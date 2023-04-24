@@ -62,6 +62,9 @@ func (r *StorageClusterReconciler) setRookCSICephFS(
 		return err
 	}
 	enableDisableFlagStr := fmt.Sprintf("%v", enableDisableFlag)
+	if rookCephOperatorConfig.Data == nil {
+		rookCephOperatorConfig.Data = map[string]string{}
+	}
 	// if the current state of 'ROOK_CSI_ENABLE_CEPHFS' flag is same, just return
 	if rookCephOperatorConfig.Data[rookEnableCephFSCSIKey] == enableDisableFlagStr {
 		return nil
@@ -436,6 +439,11 @@ func (r *StorageClusterReconciler) createExternalStorageClusterResources(instanc
 	if err != nil {
 		r.Log.Error(err, "Failed to create needed StorageClasses.")
 		return err
+	}
+	// We do not want to disable CephFS csi driver in consumer mode since
+	// CephFS storageclass is available by default.
+	if isOCSConsumerMode(instance) {
+		enableRookCSICephFS = true
 	}
 	if err = r.setRookCSICephFS(enableRookCSICephFS, instance); err != nil {
 		r.Log.Error(err, "Failed to set RookEnableCephFSCSIKey to EnableRookCSICephFS.", "RookEnableCephFSCSIKey", rookEnableCephFSCSIKey, "EnableRookCSICephFS", enableRookCSICephFS)
