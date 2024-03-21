@@ -352,11 +352,46 @@ spec:
         - apiGroups:
           - monitoring.coreos.com
           resources:
+          - alertmanagers
+          - prometheuses
+          verbs:
+          - create
+          - delete
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        - apiGroups:
+          - monitoring.coreos.com
+          resources:
           - prometheusrules
           - servicemonitors
           verbs:
           - create
           - delete
+          - get
+          - list
+          - update
+          - watch
+        - apiGroups:
+          - monitoring.coreos.com
+          resources:
+          - servicemonitors
+          verbs:
+          - create
+          - delete
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        - apiGroups:
+          - networking.k8s.io
+          resources:
+          - networkpolicies
+          verbs:
+          - create
           - get
           - list
           - update
@@ -441,8 +476,11 @@ spec:
           resources:
           - clusterserviceversions
           verbs:
+          - delete
           - get
           - list
+          - patch
+          - update
           - watch
         - apiGroups:
           - operators.coreos.com

@@ -8,6 +8,7 @@ import (
 	secv1 "github.com/openshift/api/security/v1"
 	fakeSecClient "github.com/openshift/client-go/security/clientset/versioned/typed/security/v1/fake"
 	conditionsv1 "github.com/openshift/custom-resource-status/conditions/v1"
+	opv1a1 "github.com/operator-framework/api/pkg/operators/v1alpha1"
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	v1 "github.com/red-hat-storage/ocs-operator/api/v4/v1"
 	statusutil "github.com/red-hat-storage/ocs-operator/v4/controllers/util"
@@ -106,6 +107,10 @@ func createFakeScheme(t *testing.T) *runtime.Scheme {
 		assert.Fail(t, "failed to add securityv1 scheme")
 	}
 
+	err = opv1a1.AddToScheme(scheme)
+	if err != nil {
+		assert.Fail(t, "failed to add v1alpha1 scheme")
+	}
 	return scheme
 }
 

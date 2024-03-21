@@ -8,12 +8,17 @@ import (
 
 	"github.com/go-logr/logr"
 	secv1client "github.com/openshift/client-go/security/clientset/versioned/typed/security/v1"
+	opv1a1 "github.com/operator-framework/api/pkg/operators/v1alpha1"
+	promv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	ocsv1 "github.com/red-hat-storage/ocs-operator/api/v4/v1"
 	"github.com/red-hat-storage/ocs-operator/v4/controllers/defaults"
+	"github.com/red-hat-storage/ocs-operator/v4/controllers/platform"
 	"github.com/red-hat-storage/ocs-operator/v4/controllers/util"
+	"github.com/red-hat-storage/ocs-operator/v4/templates"
 	rookCephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"gopkg.in/yaml.v2"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -21,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -60,6 +66,10 @@ type OCSInitializationReconciler struct {
 // +kubebuilder:rbac:groups=ocs.openshift.io,resources=*,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=security.openshift.io,resources=securitycontextconstraints,verbs=get;create;update
 // +kubebuilder:rbac:groups=security.openshift.io,resourceNames=privileged,resources=securitycontextconstraints,verbs=get;create;update
+// +kubebuilder:rbac:groups="networking.k8s.io",resources=networkpolicies,verbs=create;get;list;watch;update
+// +kubebuilder:rbac:groups="monitoring.coreos.com",resources={alertmanagers,prometheuses},verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="monitoring.coreos.com",resources=servicemonitors,verbs=get;list;watch;update;patch;create;delete
+// +kubebuilder:rbac:groups=operators.coreos.com,resources=clusterserviceversions,verbs=get;list;watch;delete;update;patch
 
 // Reconcile reads that state of the cluster for a OCSInitialization object and makes changes based on the state read
 // and what is in the OCSInitialization.Spec
@@ -178,6 +188,52 @@ func (r *OCSInitializationReconciler) Reconcile(ctx context.Context, request rec
 		r.Log.Error(err, "Failed to ensure uxbackend service")
 		return reconcile.Result{}, err
 	}
+	if isROSAHCP, err := platform.IsPlatformROSAHCP(); err != nil {
+		r.Log.Error(err, "Failed to determine if on ROSA HCP platform")
+	} else if isROSAHCP {
+		r.Log.Info("Setting up monitoring resources for ROSA HCP platform")
+		err = r.reconcilePrometheusOperator(instance)
+		if err != nil {
+			r.Log.Error(err, "Failed to ensure prometheus operator deployment")
+			return reconcile.Result{}, err
+		}
+
+		err = r.reconcilePrometheusKubeRBACConfigMap(instance)
+		if err != nil {
+			r.Log.Error(err, "Failed to ensure kubeRBACConfig config map")
+			return reconcile.Result{}, err
+		}
+
+		err = r.reconcilePrometheusService(instance)
+		if err != nil {
+			r.Log.Error(err, "Failed to ensure prometheus service")
+			return reconcile.Result{}, err
+		}
+
+		err = r.reconcilePrometheus(instance)
+		if err != nil {
+			r.Log.Error(err, "Failed to ensure prometheus instance")
+			return reconcile.Result{}, err
+		}
+
+		err = r.reconcileAlertManager(instance)
+		if err != nil {
+			r.Log.Error(err, "Failed to ensure alertmanager instance")
+			return reconcile.Result{}, err
+		}
+
+		err = r.reconcilePrometheusProxyNetworkPolicy(instance)
+		if err != nil {
+			r.Log.Error(err, "Failed to ensure Prometheus proxy network policy")
+			return reconcile.Result{}, err
+		}
+
+		err = r.reconcileK8sMetricsServiceMonitor(instance)
+		if err != nil {
+			r.Log.Error(err, "Failed to ensure k8sMetricsService Monitor")
+			return reconcile.Result{}, err
+		}
+	}
 
 	reason := ocsv1.ReconcileCompleted
 	message := ocsv1.ReconcileCompletedMessage
@@ -196,7 +252,9 @@ func (r *OCSInitializationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&ocsv1.OCSInitialization{}).
 		Owns(&corev1.Service{}).
+		Owns(&networkingv1.NetworkPolicy{}).
 		Owns(&corev1.Secret{}).
+		Owns(&promv1.Prometheus{}).
 		// Watcher for storagecluster required to update
 		// ocs-operator-config configmap if storagecluster spec changes
 		Watches(
@@ -258,6 +316,19 @@ func (r *OCSInitializationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				},
 			),
 		).
+		Watches(&opv1a1.ClusterServiceVersion{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      util.PrometheusOperatorName,
+				Namespace: r.OperatorNamespace,
+			},
+		},
+			handler.EnqueueRequestsFromMapFunc(
+				func(context context.Context, obj client.Object) []reconcile.Request {
+					return []reconcile.Request{{
+						NamespacedName: InitNamespacedName(),
+					}}
+				},
+			)).
 		Complete(r)
 }
 
@@ -548,5 +619,179 @@ func (r *OCSInitializationReconciler) reconcileUXBackendService(initialData *ocs
 	}
 	r.Log.Info("Service creation succeeded", "Name", service.Name)
 
+	return nil
+}
+
+func (r *OCSInitializationReconciler) reconcilePrometheusKubeRBACConfigMap(initialData *ocsv1.OCSInitialization) error {
+	prometheusKubeRBACConfigMap := &corev1.ConfigMap{}
+	prometheusKubeRBACConfigMap.Name = templates.PrometheusKubeRBACProxyConfigMapName
+	prometheusKubeRBACConfigMap.Namespace = initialData.Namespace
+
+	_, err := ctrl.CreateOrUpdate(r.ctx, r.Client, prometheusKubeRBACConfigMap, func() error {
+		if err := ctrl.SetControllerReference(initialData, prometheusKubeRBACConfigMap, r.Scheme); err != nil {
+			return err
+		}
+		prometheusKubeRBACConfigMap.Data = templates.KubeRBACProxyConfigMap.Data
+		return nil
+	})
+
+	if err != nil {
+		r.Log.Error(err, "Failed to create/update prometheus kube-rbac-proxy config map")
+		return err
+	}
+	r.Log.Info("Prometheus kube-rbac-proxy config map creation succeeded", "Name", prometheusKubeRBACConfigMap.Name)
+	return nil
+}
+
+func (r *OCSInitializationReconciler) reconcilePrometheusService(initialData *ocsv1.OCSInitialization) error {
+	prometheusService := &corev1.Service{}
+	prometheusService.Name = "prometheus"
+	prometheusService.Namespace = initialData.Namespace
+
+	_, err := ctrl.CreateOrUpdate(r.ctx, r.Client, prometheusService, func() error {
+		if err := ctrl.SetControllerReference(initialData, prometheusService, r.Scheme); err != nil {
+			return err
+		}
+		util.AddAnnotation(
+			prometheusService,
+			"service.beta.openshift.io/serving-cert-secret-name",
+			"prometheus-serving-cert-secret",
+		)
+		util.AddLabel(prometheusService, "prometheus", "odf-prometheus")
+		prometheusService.Spec.Selector = map[string]string{
+			"app.kubernetes.io/name": prometheusService.Name,
+		}
+		prometheusService.Spec.Ports = []corev1.ServicePort{
+			{
+				Name:       "https",
+				Protocol:   corev1.ProtocolTCP,
+				Port:       int32(templates.KubeRBACProxyPortNumber),
+				TargetPort: intstr.FromString("https"),
+			},
+		}
+		return nil
+	})
+	if err != nil {
+		r.Log.Error(err, "Failed to create/update prometheus service")
+		return err
+	}
+	r.Log.Info("Service creation succeeded", "Name", prometheusService.Name)
+	return nil
+}
+
+func (r *OCSInitializationReconciler) reconcilePrometheus(initialData *ocsv1.OCSInitialization) error {
+	prometheus := &promv1.Prometheus{}
+	prometheus.Name = "odf-prometheus"
+	prometheus.Namespace = initialData.Namespace
+
+	_, err := ctrl.CreateOrUpdate(r.ctx, r.Client, prometheus, func() error {
+		if err := ctrl.SetControllerReference(initialData, prometheus, r.Scheme); err != nil {
+			return err
+		}
+		templates.PrometheusSpecTemplate.DeepCopyInto(&prometheus.Spec)
+		for i := range prometheus.Spec.Alerting.Alertmanagers {
+			alertManager := &prometheus.Spec.Alerting.Alertmanagers[i]
+			if alertManager.Name == templates.AlertManagerEndpointName {
+				alertManager.Namespace = initialData.Namespace
+			}
+		}
+		return nil
+	})
+
+	if err != nil {
+		r.Log.Error(err, "Failed to create/update prometheus instance")
+		return err
+	}
+	r.Log.Info("Prometheus instance creation succeeded", "Name", prometheus.Name)
+
+	return nil
+}
+
+func (r *OCSInitializationReconciler) reconcileAlertManager(initialData *ocsv1.OCSInitialization) error {
+	alertManager := &promv1.Alertmanager{}
+	alertManager.Name = "odf-alertmanager"
+	alertManager.Namespace = initialData.Namespace
+
+	_, err := ctrl.CreateOrUpdate(r.ctx, r.Client, alertManager, func() error {
+		if err := ctrl.SetControllerReference(initialData, alertManager, r.Scheme); err != nil {
+			return err
+		}
+		util.AddAnnotation(alertManager, "prometheus", "odf-prometheus")
+		templates.AlertmanagerSpecTemplate.DeepCopyInto(&alertManager.Spec)
+		return nil
+	})
+	if err != nil {
+		r.Log.Error(err, "Failed to create/update alertManager instance")
+		return err
+	}
+	r.Log.Info("AlertManager instance creation succeeded", "Name", alertManager.Name)
+	return nil
+}
+
+func (r *OCSInitializationReconciler) reconcilePrometheusProxyNetworkPolicy(initialData *ocsv1.OCSInitialization) error {
+	promethuesProxyNetworkPolicy := &networkingv1.NetworkPolicy{}
+	promethuesProxyNetworkPolicy.Name = "prometheus-proxy-rule"
+	promethuesProxyNetworkPolicy.Namespace = initialData.Namespace
+
+	_, err := ctrl.CreateOrUpdate(r.ctx, r.Client, promethuesProxyNetworkPolicy, func() error {
+		if err := ctrl.SetControllerReference(initialData, promethuesProxyNetworkPolicy, r.Scheme); err != nil {
+			return err
+		}
+		templates.PrometheusProxyNetworkPolicyTemplate.Spec.DeepCopyInto(&promethuesProxyNetworkPolicy.Spec)
+		return nil
+	})
+	if err != nil {
+		r.Log.Error(err, "Failed to create/update Prometheus proxy network policy")
+		return err
+	}
+	r.Log.Info("Prometheus proxy network policy creation succeeded", "Name", promethuesProxyNetworkPolicy.Name)
+	return nil
+}
+
+func (r *OCSInitializationReconciler) reconcileK8sMetricsServiceMonitor(initialData *ocsv1.OCSInitialization) error {
+	k8sMetricsServiceMonitor := &promv1.ServiceMonitor{}
+	k8sMetricsServiceMonitor.Name = "k8s-metrics-service-monitor"
+	k8sMetricsServiceMonitor.Namespace = initialData.Namespace
+
+	_, err := ctrl.CreateOrUpdate(r.ctx, r.Client, k8sMetricsServiceMonitor, func() error {
+		if err := ctrl.SetControllerReference(initialData, k8sMetricsServiceMonitor, r.Scheme); err != nil {
+			return err
+		}
+		util.AddLabel(k8sMetricsServiceMonitor, "app", "odf-prometheus")
+		templates.K8sMetricsServiceMonitorSpecTemplate.DeepCopyInto(&k8sMetricsServiceMonitor.Spec)
+		return nil
+	})
+	if err != nil {
+		r.Log.Error(err, "Failed to create/update K8s Metrics Service Monitor")
+		return err
+	}
+	r.Log.Info("K8s Metrics Service Monitor creation succeeded", "Name", k8sMetricsServiceMonitor.Name)
+	return nil
+
+}
+
+func (r *OCSInitializationReconciler) reconcilePrometheusOperator(initialData *ocsv1.OCSInitialization) error {
+	csv, err := util.GetCSVWithPrefix(r.ctx, r.Client, &r.Log, util.PrometheusOperatorCSVName, initialData.Namespace)
+	if err != nil {
+		r.Log.Error(err, "Failed to fetch prometheus operator csv")
+		return err
+	}
+	if csv == nil {
+		return fmt.Errorf("prometheus csv does not exists")
+	}
+	_, err = ctrl.CreateOrUpdate(r.ctx, r.Client, csv, func() error {
+		for i := range csv.Spec.InstallStrategy.StrategySpec.DeploymentSpecs {
+			deploy := &csv.Spec.InstallStrategy.StrategySpec.DeploymentSpecs[i]
+			if deploy.Name == util.PrometheusOperatorName {
+				deploy.Spec.Replicas = ptr.To(int32(1))
+				break
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		r.Log.Error(err, "Failed to update Prometheus csv")
+		return err
+	}
 	return nil
 }

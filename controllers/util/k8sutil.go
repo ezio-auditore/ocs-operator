@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-logr/logr"
 	configv1 "github.com/openshift/api/config/v1"
+	opv1a1 "github.com/operator-framework/api/pkg/operators/v1alpha1"
 	ocsv1 "github.com/red-hat-storage/ocs-operator/api/v4/v1"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
@@ -41,6 +42,10 @@ const (
 
 	// This is the name for the OwnerUID FieldIndex
 	OwnerUIDIndexName = "ownerUID"
+	// This is the name of the prometheus operator csv
+	PrometheusOperatorCSVName = "odf-prometheus-operator"
+	// This is the name of the prometheus operator
+	PrometheusOperatorName = "prometheus-operator"
 )
 
 // GetWatchNamespace returns the namespace the operator should be watching for changes
@@ -147,4 +152,20 @@ func GenerateNameForNonResilientCephBlockPoolSC(initData *ocsv1.StorageCluster) 
 		return initData.Spec.ManagedResources.CephNonResilientPools.StorageClassName
 	}
 	return fmt.Sprintf("%s-ceph-non-resilient-rbd", initData.Name)
+}
+
+func GetCSVWithPrefix(ctx context.Context, kubeClient client.Client, logger *logr.Logger, prefix string, namespace string) (*opv1a1.ClusterServiceVersion, error) {
+	csvList := &opv1a1.ClusterServiceVersionList{}
+	err := kubeClient.List(ctx, csvList, client.InNamespace(namespace))
+	if err != nil {
+		logger.Error(err, "failed to list csvs", "namespace", namespace)
+		return nil, err
+	}
+	for index := range csvList.Items {
+		csv := &csvList.Items[index]
+		if strings.HasPrefix(csv.Name, prefix) {
+			return csv, nil
+		}
+	}
+	return nil, err
 }
