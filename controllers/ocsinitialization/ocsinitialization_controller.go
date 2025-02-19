@@ -22,6 +22,7 @@ import (
 	rookCephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"gopkg.in/yaml.v3"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -243,6 +244,12 @@ func (r *OCSInitializationReconciler) Reconcile(ctx context.Context, request rec
 		err = r.reconcilePrometheusService(instance)
 		if err != nil {
 			r.Log.Error(err, "Failed to ensure prometheus service")
+			return reconcile.Result{}, err
+		}
+
+		err = r.reconcileK8sServiceMonitorCRB(instance)
+		if err != nil {
+			r.Log.Error(err, "Failed to ensure K8s service monitor role bindings")
 			return reconcile.Result{}, err
 		}
 
@@ -807,6 +814,34 @@ func (r *OCSInitializationReconciler) reconcilePrometheus(initialData *ocsv1.OCS
 	return nil
 }
 
+func (r *OCSInitializationReconciler) reconcileK8sServiceMonitorCRB(initialData *ocsv1.OCSInitialization) error {
+	crb := &rbacv1.ClusterRoleBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "k8s-metrics-sm-prometheus-k8s",
+		},
+	}
+	_, err := ctrl.CreateOrUpdate(r.ctx, r.Client, crb, func() error {
+		crb.RoleRef = rbacv1.RoleRef{
+			APIGroup: rbacv1.GroupName,
+			Kind:     "ClusterRole",
+			Name:     "cluster-monitoring-view",
+		}
+		subject := rbacv1.Subject{
+			Kind:      "ServiceAccount",
+			Name:      "prometheus-k8s",
+			Namespace: initialData.Namespace,
+		}
+		crb.Subjects = append(crb.Subjects, subject)
+		return nil
+	})
+
+	if err != nil {
+		r.Log.Error(err, "Failed to create/update K8s service monitor Cluster Role Binding")
+		return err
+	}
+	r.Log.Info("K8s cluster role binding creation succeeded", "Name", crb.Name)
+	return nil
+}
 func (r *OCSInitializationReconciler) reconcileAlertManager(initialData *ocsv1.OCSInitialization) error {
 	alertManager := &promv1.Alertmanager{}
 	alertManager.Name = "odf-alertmanager"
