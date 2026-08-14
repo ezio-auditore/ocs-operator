@@ -57,7 +57,6 @@ updates:
       - dependency-name: "github.com/red-hat-storage/ocs-operator/v4"
       # Direct requires pinned to untagged commits / pseudo-versions
       - dependency-name: "github.com/ceph/ceph-csi-operator/api"
-      - dependency-name: "github.com/ceph/ceph-csi/api"
       - dependency-name: "github.com/kube-object-storage/lib-bucket-provisioner"
       - dependency-name: "github.com/noobaa/noobaa-operator/v5"
       - dependency-name: "github.com/openshift/api"
